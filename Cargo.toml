@@ -1,0 +1,28 @@
+[package]
+name = "practical_crypto"
+version = "0.1.0"
+edition = "2021"
+documentation="Implementation of the AES block cipher and other algorithms from the Practical Cryptography book"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "aes"
+path = "src/bin/aes.rs"
+
+[lib]
+name = "practical_crypto"
+path = "src/lib.rs"
+
+[[bench]]
+name = "bench_encrypt"
+harness = false
+
+[dependencies]
+anyhow = "1.0.75"
+clap = { version = "4.4.9", features = ["derive"] }
+log = "0.4.20"
+simplelog = "0.12.1"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
