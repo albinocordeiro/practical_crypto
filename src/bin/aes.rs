@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::{info, LevelFilter};
 use simplelog::{ColorChoice, Config, TerminalMode, TermLogger};
-use practical_crypto::aes::{decrypt_file, encrypt_file};
+use practical_crypto::aes::{decrypt_file, decrypt_file_cbc, encrypt_file, encrypt_file_cbc};
 
 #[derive(Parser, Debug, Clone)]
 struct Options {
@@ -28,15 +28,15 @@ fn main() -> Result<()> {
         TerminalMode::Mixed,
         ColorChoice::Auto
     )?;
-    info!("AES Encryption/Decryption");
+    info!("AES-128 CBC mode");
     let options = Options::parse();
     println!("{:?}", options);
     match options.command {
         Command::Encrypt => {
-            encrypt_file(&options.input_file, &options.output_file, &options.key_file)?;
+            encrypt_file_cbc(&options.input_file, &options.output_file, &options.key_file)?;
         }
         Command::Decrypt => {
-            decrypt_file(&options.input_file, &options.output_file, &options.key_file)?;
+            decrypt_file_cbc(&options.input_file, &options.output_file, &options.key_file)?;
         }
     }
     info!("Done!");

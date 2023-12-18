@@ -5,6 +5,7 @@
 use std::fs::File;
 use std::io::{Read, Write, Seek, SeekFrom};
 use log::info;
+use rand::Rng;
 use crate::consts::{INVERSE_S_BOX, NB, NK, NR, RCON, S_BOX, STATE_SIZE, TIMES_11, TIMES_13, TIMES_14, TIMES_2, TIMES_3, TIMES_9, WORD_SIZE};
 
 fn s_box(input: u8) -> u8 {
@@ -167,9 +168,10 @@ fn read_key(key_file: &str) -> anyhow::Result<[u8; 16]> {
     Ok(buffer)
 }
 
-/// Encrypts a file using AES-128
+/// Encrypts a file using AES-128 ECB mode
 /// Reads the file in blocks of 16 bytes and encrypts each block
-/// Writes the encrypted blocks to the output file
+/// Writes the encrypted blocks to the output file.
+/// Pads the last block with PKCS#7 padding if necessary
 pub fn encrypt_file(input_file: &str, output_file: &str, key_file: &str) -> anyhow::Result<()> {
     let key = read_key(key_file)?;
     let key_schedule = key_expansion(&key);
@@ -192,7 +194,7 @@ pub fn encrypt_file(input_file: &str, output_file: &str, key_file: &str) -> anyh
     Ok(())
 }
 
-/// Decrypts a file using AES-128
+/// Decrypts a file using AES-128, assume the file is padded with PKCS#7 and ECB mode.
 /// Reads the file in blocks of 16 bytes and decrypts each block
 /// Writes the decrypted blocks to the output file
 pub fn decrypt_file(input_file: &str, output_file: &str, key_file: &str) -> anyhow::Result<()> {
@@ -210,6 +212,75 @@ pub fn decrypt_file(input_file: &str, output_file: &str, key_file: &str) -> anyh
         let bytes_read = input.read(&mut buffer)?;
 
         let decrypted_block = inv_cypher(&buffer, &key_schedule);
+        if input_len as usize == STATE_SIZE { // last block
+            // PKS#7 remove the padding from the last block
+            let padding_start = decrypted_block.iter().enumerate().find(|(x, byte)| (**byte == (STATE_SIZE - *x) as u8) && decrypted_block[*x..].iter().all(|b| *b == **byte));
+            if let Some((padding_start, _)) = padding_start {
+                output.write(&decrypted_block[..padding_start])?;
+            } else {
+                output.write(&decrypted_block)?;
+            }
+            break;
+        }
+        input_len -= bytes_read as u64;
+        output.write(&decrypted_block)?;
+    }
+    output.flush()?;
+    Ok(())
+}
+
+/// Encrypts a file using AES-128 CBC mode (Cipher Block Chaining)
+/// Random IV is used as the first block and after that each block is XOR-ed with the previous block
+pub fn encrypt_file_cbc(input_file: &str, output_file: &str, key_file: &str) -> anyhow::Result<()> {
+    let key = read_key(key_file)?;
+    let key_schedule = key_expansion(&key);
+    let mut iv = [0u8; STATE_SIZE];
+    rand::thread_rng().fill(&mut iv);
+
+    let mut input = File::open(input_file)?;
+    let mut output = File::create(output_file)?;
+    output.write(iv.as_ref())?;
+
+    let mut buffer = [0; STATE_SIZE];
+    loop {
+        let bytes_read = input.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        if bytes_read < STATE_SIZE { // Pad the last block with PKCS#7 padding
+            buffer[bytes_read..].iter_mut().for_each(|x| *x = (STATE_SIZE - bytes_read) as u8);
+        }
+        buffer.iter_mut().zip(iv.iter()).for_each(|(x, y)| *x ^= y);
+        let encrypted_block = cypher(&buffer, &key_schedule);
+        iv = encrypted_block;
+        output.write(&encrypted_block)?;
+    }
+    output.flush()?;
+
+    Ok(())
+}
+
+/// Decrypts a file using AES-128 CBC mode
+pub fn decrypt_file_cbc(input_file: &str, output_file: &str, key_file: &str) -> anyhow::Result<()> {
+    let key = read_key(key_file)?;
+    let key_schedule = key_expansion(&key);
+
+    let mut input = File::open(input_file)?;
+    let mut input_len = input.seek(SeekFrom::End(0))?;
+    input.seek(SeekFrom::Start(0))?;
+    info!("File length: {} bytes", input_len);
+    let mut output = File::create(output_file)?;
+    let mut iv = [0u8; STATE_SIZE];
+
+    input.read(&mut iv)?;
+    input_len -= STATE_SIZE as u64;
+    let mut buffer = [0; STATE_SIZE];
+
+    loop {
+        let bytes_read = input.read(&mut buffer)?;
+        let mut decrypted_block = inv_cypher(&buffer, &key_schedule);
+        decrypted_block.iter_mut().zip(iv.iter()).for_each(|(x, y)| *x ^= y);
+        iv = buffer;
         if input_len as usize == STATE_SIZE { // last block
             // PKS#7 remove the padding from the last block
             let padding_start = decrypted_block.iter().enumerate().find(|(x, byte)| (**byte == (STATE_SIZE - *x) as u8) && decrypted_block[*x..].iter().all(|b| *b == **byte));
@@ -329,6 +400,36 @@ mod tests {
 
         let unencrypted_txt = std::env::temp_dir().join("unencrypted.txt");
         decrypt_file(ciphertext_txt.to_str().unwrap(), unencrypted_txt.to_str().unwrap(), key_file.to_str().unwrap())?;
+
+        let mut file = File::open(unencrypted_txt)?;
+        let mut unencrypted_content = Vec::new();
+        let _ = file.read_to_end(&mut unencrypted_content)?;
+
+        assert_eq!(unencrypted_content, content);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cbc_encrypt_decrypt() -> Result<()> {
+        let content = b"Hello World";
+        // Get the path to the temp dir
+        let plaintext_txt = std::env::temp_dir().join("plaintext.txt");
+        let mut file = File::create(plaintext_txt.to_str().unwrap())?;
+        file.write_all(content)?;
+
+        let key = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
+
+        // Save the key to a file
+        let key_file = std::env::temp_dir().join("key.txt");
+        let mut file = File::create(key_file.to_str().unwrap())?;
+        file.write_all(&key)?;
+
+        let ciphertext_txt = std::env::temp_dir().join("ciphertext.txt");
+        encrypt_file_cbc(plaintext_txt.to_str().unwrap(), ciphertext_txt.to_str().unwrap() , key_file.to_str().unwrap())?;
+
+        let unencrypted_txt = std::env::temp_dir().join("unencrypted.txt");
+        decrypt_file_cbc(ciphertext_txt.to_str().unwrap(), unencrypted_txt.to_str().unwrap(), key_file.to_str().unwrap())?;
 
         let mut file = File::open(unencrypted_txt)?;
         let mut unencrypted_content = Vec::new();
